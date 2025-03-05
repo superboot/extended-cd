@@ -509,7 +509,7 @@ cdToMostRecent() {
 }
 # ↑↑↑ END cdToMostRecent
 # ↓↓↓ def mostRecentlyModifiedDirectory()
-if declare -f mostRecentlyModifiedDirectory >/dev/null 2>/dev/null; then # only define if not defined.
+if ! declare -f mostRecentlyModifiedDirectory >/dev/null 2>/dev/null; then # only define if not defined.
 mostRecentlyModifiedDirectory() {
     local _DOCSTRING="Returns the basename of the most recently modified directory at the optional [dir]."
     local _USAGE="Usage: mostRecentlyModifiedDirectory [dir]"
