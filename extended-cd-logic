@@ -365,7 +365,6 @@ cdToParent() {
     functionTracingDebug "$@"
 
     cd ..
-    printSuperbootsInfoBar
 }
 # ↑↑↑ END cdToParent
 
@@ -509,6 +508,30 @@ cdToMostRecent() {
     return 0
 }
 # ↑↑↑ END cdToMostRecent
+# ↓↓↓ def mostRecentlyModifiedDirectory()
+if declare -f mostRecentlyModifiedDirectory >/dev/null 2>/dev/null; then # only define if not defined.
+mostRecentlyModifiedDirectory() {
+    local _DOCSTRING="Returns the basename of the most recently modified directory at the optional [dir]."
+    local _USAGE="Usage: mostRecentlyModifiedDirectory [dir]"
+    local  dir
+    dir=${1:-.}
+
+    local file latest
+
+    for file in "${dir}"/*
+    do
+        if [[ -d "$file" ]] && [[ "$file" -nt "$latest" ]]; then 
+            latest="$file"
+        fi
+    done
+    if [[ "$latest" == '' ]]; then
+        return 1
+    else
+        printf '%s\n' "$latest" 
+    fi
+}
+fi
+# ↑↑↑ END mostRecentlyModifiedDirectory
 # ↓↓↓ def cdKeybindingToMostRecent()
 cdKeybindingToMostRecent() {
     local _DOCSTRING="wrapping cdToMostRecent"
