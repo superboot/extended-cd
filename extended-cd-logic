@@ -41,13 +41,31 @@ export MARKS_FILE="$HOME/.bash/local/.bash_persistent_marks"
 
 declare -g -A marks # Set the mark associative array for mapping bookmark names to paths.
 
-# DEPENDENCIES
+# FUNCTION HELPERS
+# ↓↓↓ def functionTracingDebug()
 if ! declare -f functionTracingDebug >/dev/null 2>/dev/null; then
     functionTracingDebug()
     {
         : # This is a do-nothing function.
     }
 fi
+# ↑↑↑ END functionTracingDebug()
+# ↓↓↓ def minimumArguments()
+if ! declare -f minimumArguments >/dev/null 2>/dev/null; then
+	minimumArguments() {
+		## Checks for a minimum number of arguments. Perhaps later this could be expanded into "argumentSpecs" and would pass/fail baised on specific parameters we are looking for in our arguments.
+		# Call:   minimumArguments <minimumArgumentsRequired> <arguments>
+		local minimumArgumentsRequired numberOfArgsSupplied callingFunction
+		callingFunction="${FUNCNAME[1]}"
+		minimumArgumentsRequired="$1"
+		shift # clear $1 and shift all args down one.
+		numberOfArgsSupplied="$#"
+		[[ "$minimumArgumentsRequired" =~ [^0-9] ]] && { echo "${callingFunction}: Invalid non-integer 'minimum number of arguments' argument supplied." >&2; return 3; }
+		[[ "$numberOfArgsSupplied" -lt "$minimumArgumentsRequired" ]] && { echo "${callingFunction}: Too few arguments. Got $numberOfArgsSupplied of the $minimumArgumentsRequired required: $(listArgs "$@") "; return 3; } # If there is a miss-match in the number of arguments, report an error, naming the parent function.
+		return 0 # Success. There are the correct number of arguments.
+	}       
+fi
+# ↑↑↑ END minimumArgumentsRequired()
 
 # ENVIRONMENT
 # ↓↓↓ def extglob()
