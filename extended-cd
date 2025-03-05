@@ -1,0 +1,6 @@
+# This file is to be sourced by your bash configuration. It is required because extglob must be enabled at parse time.
+
+EXTGLOB_STATE="$(shopt -p extglob)"                  # Save current state (on/off) of the extglob shell option.
+shopt -s extglob                                     # Turn it on
+source "$(dirname "${BASH_SOURCE[0]}")/extended-cd"   # Source the main script
+$EXTGLOB_STATE                                       # Return extglob to the initial state.

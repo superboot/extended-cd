@@ -1,0 +1,578 @@
+# An advanced dynamic cd command with supporting live marks like in vim (normal mode 'm' command).  03/12/20 02:30:00 
+## Now complete with persistent on disk marks, accessible by the upper case letters.
+
+# ↓↓↓ Usage documentation
+MARKS_usage="
+  Superboot's extended 'cd' command. See 'help cd' for documentation on bash's built-in 'cd' command.
+
+    This suite offers the ability to track and traverse a history of the directories you've been to,
+        by overloading the cd command.  Additionally, it offers the ability to mark directories
+        with a single letter, both ephemerally, and persistently, through lower and upper case
+        single letter marks respectively.
+
+  COMMANDS:
+    m [a-zA-Z]               --  Mark the current directory
+    m /path/to/dir [a-zA-Z]  --  Mark the supplied path with the supplied single letter.
+    delm [a-zA-Z]            --  Remove the mark from the system.
+    cd [a-zA-Z]              --  Change directory to the directory saved in the mark.
+    cd [1..999]              --  Change directory to the directory at position N in the history stack. Appends to the end of the stack.
+
+  KEY BINDINGS:
+    alt-p    --  Print position in directory stack (max size 9 lines).
+    alt-P    --  Print position in directory stack. (max size, a full screen).
+    alt-o    --  Navigate backward one step in the history.
+    alt-i    --  Navigate forward one step in the history. 
+
+  For more help try: help cd
+
+"
+# ↑↑↑ END Usage documentation
+
+
+# GLOBAL VARIABLES
+export CD_STACK=()     # Create the stack array
+export CD_POINTER=1    # The pointer of the current position on the CD_STACK
+export CD_SPACE='    ' # Used in report formatting
+export CD_ARROW='--> ' # Used in report formatting
+export CD_HEADLINES=5  # Used in report formatting
+export CD_TAILLINES=5  # Used in report formatting
+export CD_LONGPRINTADJUSTMENT=4 # Used in report formatting. Set to 2 + number-of-prompt-lines.
+export MARKS_FILE="$HOME/.bash/local/.bash_persistent_marks"
+
+declare -g -A marks # Set the mark associative array for mapping bookmark names to paths.
+
+# DEPENDENCIES
+if ! declare -f functionTracingDebug >/dev/null 2>/dev/null; then
+    functionTracingDebug()
+    {
+        : # This is a do-nothing function.
+    }
+fi
+
+# ENVIRONMENT
+# ↓↓↓ def extglob()
+extglob() {
+    local _DOCSTRING="Manipulates the shell option 'extglob'"
+    local _USAGE="Usage: extglob <on, off, restore>"
+
+    local state
+
+    state="$(shopt -p extglob)"
+
+    declare -g EXTGLOB_RESTORE="${EXTGLOB_RESTORE:-"$state"}"
+
+    # If we got no arguments
+    if [[ $# == 0 ]]; then 
+        if [[ "$state" == 'shopt -s extglob' ]]; then
+            echo extglob: on
+            return 0
+        elif [[ "$state" == 'shopt -u extglob' ]]; then
+            echo extglob: off
+            return 1
+        else
+            echo 'Unexpected ouptut from shopt.' >&2
+            return 2
+        fi
+    fi
+
+    # If we get an argument
+    case "$1" in
+        on)
+            EXTGLOB_RESTORE="$state"
+            shopt -s extglob
+            ;;
+        off)
+            EXTGLOB_RESTORE="$state"
+            shopt -u extglob
+            ;;
+        restore)
+            if [[ "$EXTGLOB_RESTORE" == 'shopt -s extglob' ]]; then
+                shopt -s extglob
+                return 0
+            elif [[ "$EXTGLOB_RESTORE" == 'shopt -u extglob' ]]; then
+                shopt -u extglob
+                return 0
+            else
+                echo 'Unexpected value of EXTGLOB_RESTORE.' >&2
+                return 2
+            fi
+            ;;
+    esac
+}
+# ↑↑↑ END ,
+
+# MARKS SYSTEM
+# ↓↓↓1 def m()
+m ()
+{
+    # If we got -h or --help, display help and end.
+    [[ "$1" == '-h' ]] || [[ "$1" =~ ^--h ]] &&  { cdDisplayHelp ; return 0; } # 
+
+    # Check arguments.
+    while true # A loop that shouldn't loop. We should break out of this on the first go through.
+    do
+        # If m is called with no arguments, print the list of marks.
+        if [[ $# -eq 0 ]]; then # if this was called with no arguments.
+            local m_key # makes it local to the function
+            for m_key in "${!marks[@]}"; # For each key in the associative array
+            do
+                echo "$m_key: ${marks[$m_key]}" # print the key: value  pairs.
+            done | sort -d
+            return 0
+        fi
+
+        # m <./path/to/absolut/or/relative/dir>  <mark-character>
+        if [[ $# == 2 ]] && [[ ${#2} == 1 ]]; then # If there are two arguments and the second one is one character long.
+            # There are two arguments. Therefore they are of the form: m <path to dir to mark> <mark>
+            local checkDIR=$(realpath -s "$1")
+            if [[ -d "$checkDIR" ]] || [[ -L "$checkDIR" ]]; then # If the directory is real or a link
+                local markDIR="$checkDIR"
+                local markName="$2"
+            else
+                echo "Dir $checkDIR is not a real directory or symlink. Mark not set." >&2
+            fi
+            break
+        fi
+
+        # If we are only sent a single-character argument, and if it is a letter, it is a mark name. Set it to PWD.
+        if [[ $# -eq 1 ]] && [[ ${#1} -eq 1 ]]; then 
+            local markDIR="$PWD"
+            local markName="$1"
+            marks[$markName]="$markDIR" # Store it in the array.
+            if [[ "$markName" =~ [A-Z] ]]; then # If the mark name is a single upper-case letter. We only persist upper-case marks.
+                MARKS_persistMarkToDisk "$markDIR" "$markName" 
+            fi
+            break
+        fi
+        break # A emergency break. We shouldn't be going through this loop again.
+    done
+    # Possible add this to some kind of file or cross session something or other. It's late. I'm done for now. 03/12/20 00:11:44 
+}
+# ↑↑↑1 END m
+# ↓↓↓ def delm()
+delm() {
+    local _DOCSTRING="Delete a mark."
+    local _USAGE="Usage: delm mark"
+    functionTracingDebug "$@"
+
+    local  mark
+    minimumArguments 1 "$@" || return 3 # Quits the entire script if there are not enough arguments.
+    mark=$1
+    [[ "$mark" =~ [A-Z] ]] && MARKS_removePersistentMark "$mark" # If $mark is a single upper case mark, Remove it from the persistant disk file.
+    [[ "$mark" =~ [a-z] ]] && MARKS_removeTempMark "$mark" # If $mark is a single lower case mark, remove it from the environment.
+}
+# ↑↑↑ END delm
+# ↓↓↓ def MARKS_persistMarkToDisk()
+MARKS_persistMarkToDisk() {
+    local _DOCSTRING="Adds the current mark to the persistant disk file of marks. Mark must be upper-case."
+    local _USAGE="Usage: persistMarkToDisk path mark"
+    functionTracingDebug "$@"
+
+    local  path mark
+    minimumArguments 2 "$@" || return 3 # Quits the entire script if there are not enough arguments.
+    path=$1
+    mark=$2
+
+    echo "$mark|$path" >> "$MARKS_FILE" # Append the new mark to the disk.
+    MARKS_readMarksFile # Read in now appended to file, which will eliminate duplicates, keeping the most recently added one.
+    MARKS_writeMarksFile # Write out the now de-dupped list.
+}
+# ↑↑↑ END MARKS_persistMarkToDis
+# ↓↓↓ def MARKS_removeTempMark()
+MARKS_removeTempMark() {
+    local _DOCSTRING="Removes the temoporary (lower-case) marks from the environment array."
+    local _USAGE="Usage: MARKS_removeTempMark mark"
+    functionTracingDebug "$@"
+
+    local  mark
+    minimumArguments 1 "$@" || return 3 # Quits the entire script if there are not enough arguments.
+    mark=$1
+
+    unset marks["$mark"] # Remove the mark from the array.
+
+}
+# ↑↑↑ END MARKS_removeTempMark
+# ↓↓↓ def MARKS_removePersistentMark()
+MARKS_removePersistentMark() {
+    local _DOCSTRING="Removes a mark from the on-disk marks file."
+    local _USAGE="Usage: MARKS_removePersistentMark <mark>"
+    functionTracingDebug "$@"
+
+    local  mark
+    minimumArguments 1 "$@" || return 3 # Quits the entire script if there are not enough arguments.
+    mark=$1
+
+    if [[ "$1" =~ [A-Z] ]] && [[ ${marks["$mark"]+abc} ]]; then # If the mark is a single upper case letter, and it is in the array.
+        MARKS_readMarksFile # Get the latest updates from the disk.
+        unset marks["$mark"] # Remove the mark from the marks array in this environment.
+        MARKS_writeMarksFile # Write the current array to the disk.
+    fi
+}
+# ↑↑↑ END MARKS_removePersistentMark
+# ↓↓↓ def MARKS_readMarksFile()
+MARKS_readMarksFile() {
+    local _DOCSTRING="Reads in the marks file and creates the marks in the environment."
+    local _USAGE="Usage: MARKS_readMarksFIle "
+    functionTracingDebug "$@"
+
+    local readMark readPath
+
+    while read line
+    do
+        readMark="${line%%|*}" # Get the first field, delimited on pipe.
+        readPath="${line#*|}" # Get the second field, delimited on pipe.
+        marks[$readMark]="$readPath" # Store it in the array.
+    done < "$MARKS_FILE"
+}
+# ↑↑↑ END MARKS_readMarksFile
+# ↓↓↓ def MARKS_writeMarksFile()
+MARKS_writeMarksFile() {
+    local _DOCSTRING="Overwrite the contents of the marks file with the contents of the marks array."
+    local _USAGE="Usage: MARKS_writeMarksFile "
+    functionTracingDebug "$@"
+
+    local mark path line
+
+    \cp -f "$MARKS_FILE" "$MARKS_FILE-backup" # Make a backup of the marks file. # The backslash in \cp is used to suppress alias expansion, so it is just plain cp. 
+    :>"$MARKS_FILE" # Erase the contents of the marks file.
+    for mark in "${!marks[@]}" # For each mark set in the environment.
+    do
+        if [[ "$mark" =~ [A-Z] ]]; then # If the mark is upper-case, write it to disk. We only persist upper-case marks
+            path="${marks["$mark"]}" # Retreive the path associated with it.
+            line="${mark}|${path}" # Compose the config file line.
+            echo "$line" >> "$MARKS_FILE" # Append the line to the file.
+        fi
+    done
+}
+# ↑↑↑ END MARKS_writeMarksFile
+# ↓↓↓1 def MARKS_thereIsAMarkNamed()
+MARKS_thereIsAMarkNamed()
+{
+    # This function takes a single argument and checks if it is the name of a mark.
+    local markmatch 
+    for markmatch in "${!marks[@]}"
+    do
+        if [[ "$markmatch" == "$1" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+# ↑↑↑1 END MARKS_thereIsAMarkNamed
+
+# CD SYSTEM
+# ↓↓↓1 def cd()
+cd ()
+{
+    # This function works with the m() function that creates marks, and extends the cd command to be able to cd to the marks.
+    if [[ $# -eq 0 ]]; then # we got no arguments, just cd.
+        local targetDIR="$HOME"
+        local doNotPassGo=true
+    fi
+
+    extglob on # Make sure extglob is on so we can match 1+ commas
+    while [[ $# -gt 0 ]] && [[ "$doNotPassGo" != "true" ]]; # while we have arguments, and we are not supposed to skip this loop.
+    do
+        case "$1" in 
+            # The first ones here are the builtin options to bash's builtin 'cd' command.
+            -L) normalCDArgs="${normalCDArgs} $1"
+                ;;
+            -P) normalCDArgs="${normalCDArgs} $1"
+                ;;
+            -e) normalCDArgs="${normalCDArgs} $1"
+                ;;
+            -@) normalCDArgs="${normalCDArgs} $1"
+                ;;
+            -h|--help) cdDisplayHelp
+                ;;
+            # Now we check for the single letter mark.
+            [a-zA-Z])  if [[ -d ./$1 ]]; then # check if there is a directory named the same as the mark.
+                           local targetDIR="./$1" # There is a dir named the same as our mark. cd to that instead of the bookmarked mark.
+                           break
+                       fi
+                       if [[ -v targetDIR ]]; then # Check if we've already set a target dir (specifying a mark after a non option argument (dir))
+                           : # The target dir is already set.
+                           echo "Mark option specified after non-option argument. Ignoring mark option." >&2
+                       fi
+                       if MARKS_thereIsAMarkNamed "$1"; then # Check if there is a mark by the name $1
+                           targetDIR="${marks[${1}]}" # If so, set it's bookmark as the target.
+                           break # And break out of the case.
+                       else  # The named mark is not a real mark.
+                           #echo "Mark \"${1}\" not set." >&2 # Supply an error message.
+                           echo "\"${1}\": No such directory or mark." >&2 # Supply an error message.
+                           return 1 # This is like exit 1, but we arn't in script, we are a function in the interactive environment.
+                       fi
+                ;;
+            -)     local targetDIR="${OLDPWD:-$HOME}" 
+                   #builtin cd - && cdStackAppend "$PWD" # if we have a cd -  just go home. If you want to use stupid options, tough. 
+                ;;
+            [0-9]) local targetDIR="${CD_STACK["$1"]}" # If it's a single digit, go to that index on the stack.
+                ;;
+            [0-9][0-9]) local targetDIR="${CD_STACK["$1"]}" # If it's a double digit, go to that index on the stack.
+                ;;
+            [0-9][0-9][0-9]) local targetDIR="${CD_STACK["$1"]}" # If it's a tripple digit, go to that index on the stack.
+                ;;
+            +([,]))     cdToMostRecent "$1" # If it's a comma, go to the most recently modified directory.
+                ;;
+            ,-)     local thereIsADir; while thereIsADir="$(mostRecentlyModifiedDirectory)"; do cd "$thereIsADir"; pwd; done; return 0
+                ;;
+            [^-]*) local targetDIR="$1" # If it's just a path, go there.
+                ;;
+        esac
+        shift
+    done
+    extglob restore
+
+    if [[ "$targetDIR" == "$PWD" ]] || [[ "$targetDIR" == '.' ]]; then # If we are going to the same place we are.
+        return 0 # Just stay there.
+    fi
+    builtin cd $normalCDArgs "$targetDIR" && cdStackAppend "$PWD" # AND append the new PWD to the stack.
+}
+# ↑↑↑1 END cd
+# ↓↓↓ def cdDisplayHelp()
+cdDisplayHelp() {
+    local _DOCSTRING="Display the usage information."
+    local _USAGE="Usage: cdDisplayHelp "
+    functionTracingDebug "$@"
+
+    echo "$MARKS_usage"
+}
+# ↑↑↑ END cdDisplayHelp
+# ↓↓↓ def ,()
+,() {
+    local _DOCSTRING="cd to the most recently modified directory in the pwd."
+    local _USAGE="Usage: , "
+
+    cd ,
+}
+# ↑↑↑ END ,
+# ↓↓↓ def ,,()
+,,() {
+    local _DOCSTRING="cd to the deepest level of recently modified directories."
+    cd ,-
+}
+# ↑↑↑ END ,,
+# ↓↓↓ def ..()
+..() {
+    local _DOCSTRING="cd up one directory"
+    cd ..
+}
+# ↑↑↑ END ..
+# ↓↓↓ def cdToParent()
+cdToParent() {
+    local _DOCSTRING="Change the working directory to the parent directory, and print the prompt."
+    local _USAGE="Usage: cdToParent "
+    functionTracingDebug "$@"
+
+    cd ..
+    printSuperbootsInfoBar
+}
+# ↑↑↑ END cdToParent
+
+
+
+# ↓↓↓1 def cdStackClearAfterPointer()
+cdStackClearAfterPointer ()
+{
+    while [[ ${#CD_STACK[*]} -gt $((CD_POINTER + 1)) ]]; # While there are elements ahead of the pointer.
+    do
+        unset CD_STACK[-1] # delete the last element
+    done
+}
+# ↑↑↑1 END cdStackClearAfterPointer
+# ↓↓↓1 def cdStackAppend()
+cdStackAppend ()
+{
+    # Appends the given direcotry to the stack
+    ##   For now, this is all it does. But this is where to implement some disk caching scheme.
+    ##   
+    ##   Just like GIMP, once you change, you can't redo.  Maybe we can get insane and do a vim gundo tree thing. 
+    cdStackClearAfterPointer  # clear the stack forward.
+    CD_STACK[${#CD_STACK[*]}]="$*"
+    local sizeOfStack="${#CD_STACK[*]}"
+    CD_POINTER="$((sizeOfStack - 1))"
+}
+# ↑↑↑1 END cdStackAppend
+# ↓↓↓1 def cdStackBackward()
+cdStackBackward ()
+{
+    # Moves one back in the cd stack.
+    if [[ "$CD_POINTER" -gt 0 ]]; then  # Make sure we are not at the beginning, or we'll fall off.
+        # Check to see if there is a stack position behind.
+        if [[ -v CD_STACK[$((CD_POINTER - 1))] ]]; then
+            CD_POINTER=$((CD_POINTER - 1)) # move the pointer back in the stack
+            # Note we are directly calling the builtin 'cd' so we don't change the stack by moving.
+            builtin cd "${CD_STACK[CD_POINTER]}" # cd to the new location 
+            if declare -pf printSuperbootsPS1Prompt &>/dev/null; then # If the fancy prompt has been defined.
+                printSuperbootsPS1Prompt
+            else
+                echo "$CD_ARROW$CD_POINTER: $PWD" # print where we are since PS1 promt isn't updated by the "background" cd command.
+            fi
+        fi
+    else
+        : # do nothing, because the pointer is at zero, and there is nowhere else to go.
+    fi
+}
+# ↑↑↑1 END cdStackBackward
+# ↓↓↓1 def cdStackForward()
+cdStackForward ()
+{
+    # Moves one forward in the cd stack, if there is one.
+    local sizeOfStack="${#CD_STACK[*]}"
+    if [[ "$CD_POINTER" -lt $((sizeOfStack - 1 ))  ]]; then # Make sure we are not at the end of the list or we'll fall off.
+        # Check to see if there is a stack position ahead.
+        if [[ -v CD_STACK[$((CD_POINTER + 1))] ]]; then
+            CD_POINTER=$((CD_POINTER + 1)) # move the pointer forward in the stack
+            builtin cd "${CD_STACK[CD_POINTER]}" # cd to the new location # Note we are directly calling the builtin 'cd' so we don't change the stack by moving.
+            if declare -pf printSuperbootsPS1Prompt &>/dev/null; then # If the fancy prompt has been defined.
+                printSuperbootsPS1Prompt
+            else
+                echo "$CD_ARROW$CD_POINTER: $PWD" # print where we are since PS1 promt isn't updated by the "background" cd command.
+            fi
+        fi
+    else
+        : # Do nothing because we are at the most recent entry and there is nowhere else to go.
+    fi
+}
+# ↑↑↑1 END cdStackForward
+# ↓↓↓1 def cdStackPrintStack()
+cdStackPrintStack ()
+{
+    local _DOCSTRING="Print the default number of lines of the path history."
+    local _USAGE="Usage: cdStackPrintStackLong [HEADLINES] [TAILLINES]"
+    functionTracingDebug "$@"
+
+    local frame='#------------#'
+    local stack_key cd_local_headlines cd_local_taillines # Declare named variables as local to this function.
+    cd_local_headlines="${1:-$CD_HEADLINES}" # If we were supplied with an argument, use it, or if not, the default.
+    cd_local_taillines="${2:-$CD_TAILLINES}" # If we were supplied with an argument, use it, or if not, the default.
+    echo "$frame"
+    for stack_key in "${!CD_STACK[@]}"; # For each key in the associative array
+    do
+        if [[ $stack_key -lt $((CD_POINTER - cd_local_headlines)) ]]; then # If the index is too far back in the array to be shown.
+            : # do nothing.
+        elif [[ $stack_key -eq $CD_POINTER ]]; then # if the index is the one we are at
+            echo "${CD_ARROW}${stack_key}: ${CD_STACK[$stack_key]}" # print the key: value pair with the arrow pointer.
+        elif [[ $stack_key -gt $((CD_POINTER + cd_local_taillines)) ]]; then # If the index is too far forward in the array to be shown.
+            : # Do nothing.
+        else
+            echo "${CD_SPACE}${stack_key}: ${CD_STACK[$stack_key]}" # print the key: value pair indented with spaces.
+        fi
+    done
+    echo "$frame"
+}
+# ↑↑↑1 END cdStackPrintStack
+# ↓↓↓ def cdStackPrintStackLong()
+cdStackPrintStackLong() {
+    local _DOCSTRING="Print a full screen of the path history."
+    local _USAGE="Usage: cdStackPrintStackLong"
+    functionTracingDebug "$@"
+
+    local  headLines tailLines printSize
+    headLines=$1 
+    tailLines=$2
+
+    printSize="$(min "${#CD_STACK[*]}" "$(( $LINES - $CD_LONGPRINTADJUSTMENT ))")" # Find which is smaller, the screen height, or the stack array.
+
+    case "$printSize" in
+        1)
+            cdStackPrintStack 0 0 # We only have one line, so print no leading or trailing lines.
+            ;;
+        2)
+            cdStackPrintStack 1 0 # We only have two lines, so print no trailing lines.
+            ;;
+        3)
+            cdStackPrintStack 1 1 # We only have three lines, so print just one leading and trailing line.
+            ;;
+        *) # We have enough lines to calculate the answer.
+            headLines="$((printSize / 2 - 1))"
+            tailLines="$((printSize / 2))"
+            cdStackPrintStack "$headLines" "$tailLines"
+            ;;
+    esac
+}
+# ↑↑↑ END cdStackPrintStackLong
+# ↓↓↓ def cdToMostRecent()
+cdToMostRecent() {
+    local _DOCSTRING="cds to the most recent dir in the pwd. Calls itself recursively until the supplied argument is exhausted, or there is no deeper to go."
+    local _USAGE="Usage: cdToMostRecent [,]..."
+
+    local levelsString="${1:-,}"
+    local target i
+
+    for (( i=0; i<${#levelsString}; i++ )) # For each character in the string
+    do
+        target="$(mostRecentlyModifiedDirectory)"
+        [[ $? != 0 ]] && break
+        builtin cd "$target"
+    done
+    return 0
+}
+# ↑↑↑ END cdToMostRecent
+# ↓↓↓ def cdKeybindingToMostRecent()
+cdKeybindingToMostRecent() {
+    local _DOCSTRING="wrapping cdToMostRecent"
+    local _USAGE="Usage: cdKeybindingToMostRecent "
+    functionTracingDebug "$@"
+
+    cdToMostRecent
+    pwd
+}
+# ↑↑↑ END cdKeybindingToMostRecent
+
+
+
+# DEBUGING FUNCTIONS
+# ↓↓↓ def cdAllOverThePlace()
+cdTo20Places() {
+    local _DOCSTRING="Changes directory to 20 directories to populate the cd stack."
+    local _USAGE="Usage: cdAllOverThePlace "
+    functionTracingDebug "$@"
+    
+    local place
+
+    for place in /mnt /home /etc /var /home john dls .. doc .. media audio /var log /etc network /mass john books;
+    do
+        cd "$place"
+    done
+}
+# ↑↑↑ END cdAllOverThePlace
+# ↓↓↓ def testCdLong()
+testCdLong() {
+    local _DOCSTRING="test the cd long function"
+    local _USAGE="Usage: testCdLong "
+    functionTracingDebug "$@"
+
+    source ~/.bash/.bash_utility_functions
+    source ~/.bash/.bash_mark-system
+    cdTo20Places
+    cdTo20Places
+    cdTo20Places
+    for i in {1..30}
+    do
+        cdStackBackward # go 30 dirs back.
+    done
+    cdStackPrintStackLong
+}
+# ↑↑↑ END testCdLong
+
+# BINDINGS
+# Setup the bindings to the keyboard.
+bind -r '"\ei"' # clear any binding for Alt-i
+bind -x '"\ei":cdStackForward' # Bind Alt-i to move forward in the stack.
+bind -r '"\eo"' # clear any binding for Alt-o
+bind -x '"\eo":cdStackBackward' # Bind Alt-o to move backward in the stack.
+bind -r '"\ep"' # clear any binding for Alt-p
+bind -x '"\ep":cdStackPrintStack' # Bind Alt-p to print the stack.
+bind -x '"\eP":cdStackPrintStackLong' # Bind Alt-p to print the stack.
+bind -r '"\eu"' # clear any binding for Alt-p
+bind -x '"\eu":cdToParent' # Bind alt-u to go up one directory.
+## Alt-, to cd to most recently modified directory
+bind -r '"\e,"' # clear any binding for Alt-p
+bind -x '"\e,":cdKeybindingToMostRecent' # Bind alt-, to go to the most recently modified directory.
+
+# Start the stack off with the current PWD
+## This is only run when this file is sourced by .bashrc (so, once per terminal/bash session/etc.)
+cdStackAppend "$PWD"
+
+MARKS_readMarksFile # Read the marks file into the environment.
